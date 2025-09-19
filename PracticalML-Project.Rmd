@@ -1,0 +1,160 @@
+---
+title: "Practical ML Project"
+author: "M M"
+date: "2025-09-19"
+output: 
+  html_document:
+   toc: true
+   toc_float: true
+   number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(2025)
+```
+
+## 1. Overview
+
+We predict how barbell lifts were performed (“classe”: A–E) from wearable sensor data (belt, forearm, arm, dumbbell). We split the provided training set into train/validation, compare several models using cross-validation, report expected out-of-sample (OOS) error, and use the best model to predict the 20 test cases.
+
+## 2. Data & Preprocessing
+
+We use the course datasets and standard cleaning steps for this assignment:
+	- Remove columns with >95% missing.
+	- Drop non-predictive identifiers / timestamps.
+	- Remove near-zero-variance predictors.
+	- Keep only predictors present in both train & test after cleaning.
+
+```{r data}
+library(caret)
+library(tidyverse)
+
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+train_raw <- read.csv(train_url, na.strings = c("NA", "", "#DIV/0!"))
+test_raw  <- read.csv(test_url,  na.strings = c("NA", "", "#DIV/0!"))
+
+# Drop columns with >95% NA in training
+na_rate <- colSums(is.na(train_raw)) / nrow(train_raw)
+keep_na <- names(na_rate[na_rate < 0.95])
+
+train1 <- train_raw[, keep_na]
+test1  <- test_raw[,  intersect(keep_na, names(test_raw))]
+
+# Remove non-predictive columns (IDs / time / window flags)
+drop_cols <- c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2",
+               "cvtd_timestamp","new_window","num_window","problem_id")
+train2 <- train1[, setdiff(names(train1), drop_cols)]
+test2  <- test1[,  setdiff(names(test1),  drop_cols)]
+
+# Ensure outcome factor present
+train2$classe <- factor(train2$classe)
+
+# Remove near-zero-variance predictors
+nzv <- nearZeroVar(train2, saveMetrics = TRUE)
+train3 <- train2[, !nzv$nzv]
+test3  <- test2[,  intersect(names(train2)[!nzv$nzv], names(test2))]
+
+# Align columns between train and test (excluding outcome)
+predictors <- setdiff(names(train3), "classe")
+test3 <- test3[, predictors]
+dim(train3); dim(test3)
+```
+
+## 3. Train/Validation Split & Cross-Validation
+
+We hold out 30% for validation and perform 5-fold CV inside training.
+
+```{r split-data}
+set.seed(2025)
+inTrain <- createDataPartition(train3$classe, p = 0.70, list = FALSE)
+trn <- train3[inTrain, ]
+val <- train3[-inTrain, ]
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, allowParallel = TRUE,
+                     summaryFunction = multiClassSummary)
+```
+
+## 4. Models
+
+We compare a Random Forest, Gradient Boosting (GBM), and a simple CART tree.
+
+```{r split}
+# Random Forest
+rf_fit <- train(classe ~ ., data = trn, method = "rf",
+                trControl = ctrl, tuneLength = 3, ntree = 500)
+
+# GBM
+gbm_fit <- train(classe ~ ., data = trn, method = "gbm",
+                 trControl = ctrl, tuneLength = 3, verbose = FALSE)
+
+# CART (rpart)
+cart_fit <- train(classe ~ ., data = trn, method = "rpart",
+                  trControl = ctrl, tuneLength = 5)
+
+rf_fit; gbm_fit; cart_fit
+```
+
+Cross-validated comparison (Accuracy)
+
+```{r resamples, fig.height=3.5}
+res <- resamples(list(RandomForest = rf_fit, GBM = gbm_fit, CART = cart_fit))
+summary(res)
+dotplot(res)
+```
+
+Figure 1: Cross-validated accuracy across models (5-fold CV).
+
+## 5. Validation Performance & Expected OOS Error
+
+We evaluate on the 30% hold-out validation set. Our expected OOS error ≈ 1 − accuracy(val) for the chosen model.
+
+```{r validate}
+pred_rf  <- predict(rf_fit,  val)
+pred_gbm <- predict(gbm_fit, val)
+pred_ct  <- predict(cart_fit, val)
+
+cm_rf  <- confusionMatrix(pred_rf,  val$classe)
+cm_gbm <- confusionMatrix(pred_gbm, val$classe)
+cm_ct  <- confusionMatrix(pred_ct,  val$classe)
+
+acc_table <- tibble(
+  Model = c("Random Forest", "GBM", "CART"),
+  Accuracy = c(cm_rf$overall["Accuracy"], cm_gbm$overall["Accuracy"], cm_ct$overall["Accuracy"])
+)
+acc_table
+```
+
+Chosen model: Random Forest (highest accuracy).
+Validation accuracy (RF): `r round(cm_rf$overall["Accuracy"], 4)`
+Expected OOS error: `r round(1 - cm_rf$overall["Accuracy"], 4)`
+
+Variable Importance (top drivers)
+
+```{r varimp, fig.height=3.5}
+vi <- varImp(rf_fit)
+plot(vi, top = 15)
+```
+
+Figure 2: Top predictors by RF variable importance.
+
+## 6. Predict the 20 Test Cases
+
+We apply the chosen model (RF) to the cleaned test set and create the 20 submission files.
+
+```{r predict20}
+pred_test <- predict(rf_fit, test3)
+pred_test
+```
+
+```{r write-files, eval=TRUE}
+pml_write_files <- function(x) {
+  for (i in seq_along(x)) {
+    fn <- paste0("problem_id_", i, ".txt")
+    write.table(x[i], file = fn, quote = FALSE, row.names = FALSE, col.names = FALSE)
+  }
+}
+pml_write_files(pred_test)
+```
